@@ -1,0 +1,79 @@
+name: update-My_AI
+
+# 每天 07:00（北京时间）拉 MetaCubeX 的 category-ai-!cn，
+# 与 rules/My_AI_Add.list 合并去重，生成 rules/My_AI.list 和 rules/My_AI.mrs
+on:
+  schedule:
+    - cron: '0 23 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rules/My_AI_Add.list
+      - .github/workflows/update-My_AI.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-My_AI
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Install Mihomo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          url="$(gh api repos/MetaCubeX/mihomo/releases/latest \
+            --jq '[.assets[] | select(.name | test("^mihomo-linux-amd64-v[0-9.]+\\.gz$"))][0].browser_download_url')"
+          echo "下载：$url"
+          curl -fL --retry 5 --retry-all-errors -o /tmp/mihomo.gz "$url"
+          gzip -dc /tmp/mihomo.gz > /tmp/mihomo
+          chmod 755 /tmp/mihomo
+          /tmp/mihomo -v
+
+      - name: Merge lists
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/upstream.list \
+            'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.list'
+          up=$(grep -cv '^[[:space:]]*$' /tmp/upstream.list || true)
+          echo "上游条目：$up"
+          # 防止上游异常返回空文件把规则清空
+          test "$up" -ge 100
+          cat /tmp/upstream.list rules/My_AI_Add.list \
+            | tr -d '\r' \
+            | sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            | grep -v '^$' \
+            | sort -u > /tmp/My_AI.list
+          echo "合并后条目：$(wc -l < /tmp/My_AI.list)"
+
+      - name: Convert to MRS
+        run: |
+          set -euo pipefail
+          /tmp/mihomo convert-ruleset domain text /tmp/My_AI.list /tmp/My_AI.mrs
+          test -s /tmp/My_AI.mrs
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          cp /tmp/My_AI.list rules/My_AI.list
+          cp /tmp/My_AI.mrs rules/My_AI.mrs
+          git add rules/My_AI.list rules/My_AI.mrs
+          if git diff --cached --quiet; then
+            echo "规则无变化，不提交。"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "更新 AI 分流规则（MetaCubeX + 自加）"
+          git push
